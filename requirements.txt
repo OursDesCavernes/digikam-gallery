@@ -1,0 +1,5 @@
+pytest
+flask
+sqlalchemy
+Flask-SQLAlchemy
+sigal
