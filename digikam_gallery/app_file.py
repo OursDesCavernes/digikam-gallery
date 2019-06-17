@@ -1,4 +1,8 @@
+from io import BytesIO
+
 import jinja2
+from PIL import Image
+# from configobj import ConfigObj
 from flask import Flask, send_file, render_template
 from flask_sqlalchemy import SQLAlchemy
 from sigal.settings import create_settings
@@ -6,8 +10,16 @@ from sigal.writer import THEMES_PATH
 from sqlalchemy.orm import relationship
 from sqlalchemy.orm.exc import NoResultFound
 
-datadir = "/mnt/Data/thomas/Photos"
+# print("###")
+# config = ConfigObj('/home/thomas/.config/digikamrc')
+# config.sections()
+# print("###")
+#
+# if config["Database Settings"]["Database Type"] != "QSQLITE":
+#     raise NotImplemented("Unsupported database: " + config["Database Settings"]["Database Type"])
 
+# datadir = config["Database Settings"]["Database Name"]
+datadir = "/mnt/Data/thomas/Photos"
 sigal_themes = THEMES_PATH
 
 app = Flask(__name__,
@@ -17,12 +29,10 @@ app = Flask(__name__,
 
 my_loader = jinja2.ChoiceLoader([
     app.jinja_loader,
-    jinja2.FileSystemLoader(sigal_themes + "/default/templates"),
-])
+    jinja2.FileSystemLoader(sigal_themes + "/default/templates")])
 app.jinja_loader = my_loader
 
 app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///" + datadir + "/digikam4.db"
-app.config["SQLALCHEMY_BINDS"] = {"thumbs": "sqlite:///" + datadir + "/thumbnails-digikam.db"}
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 
 db = SQLAlchemy(app)
@@ -54,11 +64,6 @@ class Images(db.Model):
     r_album = relationship(Albums, primaryjoin='foreign(Images.album) == remote(Albums.id)')
 
 
-@app.template_filter()
-def striptags(x):
-    return x
-
-
 settings = create_settings(html_language="FR_fr", show_map=False)
 
 
@@ -68,8 +73,7 @@ class Theme:
 
 
 class Album:
-    def __init__(self, id, name):
-        self.id = id
+    def __init__(self, name):
         self.name = name
         self.title = name
         self.url = "/albums/" + str(id)
@@ -95,8 +99,9 @@ class Media:
         try:
             self.exif["iso"], self.exif["exposure"], self.exif["fstop"], self.exif["focal"], self.exif["Make"], \
             self.exif["Model"] = db.session.query(ImageMetadata.sensitivity, ImageMetadata.exposureTime,
-                                                  ImageMetadata.aperture, ImageMetadata.focalLength, ImageMetadata.make,
-                                                  ImageMetadata.model).filter_by(imageid=idx).one()
+                                                  ImageMetadata.aperture, ImageMetadata.focalLength,
+                                                  ImageMetadata.make, ImageMetadata.model
+                                                  ).filter_by(imageid=idx).one()
         except NoResultFound:
             self.exif = None
 
@@ -108,46 +113,41 @@ class Media:
     def big(self):
         return "/images/" + str(self.idx)
 
+    @property
+    def thumbnail(self):
+        return "/thumbs/" + str(self.idx)
+
 
 @app.route('/')
 def home():
-    alb = Album(1, "My photos")
+    alb = Album("My photos")
     alb.add_media(
-        [Media(x[0]) for x in db.session.query(Images.id).filter(Images.id == ImageInformation.imageid).filter(
-            ImageInformation.rating == 5).distinct()])
+        [Media(idx[0]) for idx in
+         db.session.query(Images.id).filter(Images.id == ImageInformation.imageid).filter(
+             ImageInformation.rating == 5).distinct().order_by(ImageInformation.creationDate.desc())])
     return render_template("album.html", album=alb, settings=settings, theme=Theme())
-
-
-@app.route('/list')
-def list_albums():
-    albums = [Album(i, n) for i, n in db.session.query(Albums.id, Albums.relativePath).filter(
-        Images.album == Albums.id).filter(Images.id == ImageInformation.imageid).filter(
-        ImageInformation.rating == 5).distinct()]
-    return render_template("album_list.html", albums=albums, theme=Theme(), index_title="Test title",
-                           album=Album(1, "/"), settings=settings)
-
-
-@app.route('/albums/<album_id>')
-def album(album_id):
-    r_album = db.session.query(Albums).filter_by(id=album_id).one()
-
-    ret = ["<html>", "<body>", f"<h1>{r_album.r_album_root.specificPath}{r_album.relativePath}</h1>"]
-
-    for image_name, image_id in db.session.query(Images.name, Images.id).filter_by(album=album_id):
-        rating, format = db.session.query(ImageInformation.rating, ImageInformation.format).filter_by(
-            imageid=image_id).one()
-        if rating == 5:
-            ret += [f"<p><a href=/images/{image_id}>{image_name}</a> Rating: {rating}</p>"]
-
-    ret += ["<p><a href=/>Back</a></p>", "</body>", "</html>"]
-    return "\n".join(ret)
 
 
 @app.route('/images/<image_id>')
 def image(image_id):
-    image_name, album_id = db.session.query(Images.name, Images.album).filter_by(id=image_id).one()
+    image_name, album_id = db.session.query(Images.name, Images.album).filter_by(id=image_id).filter(
+        Images.id == ImageInformation.imageid).filter(ImageInformation.rating == 5).one()
     album_relative_path = db.session.query(Albums.relativePath).filter_by(id=album_id).one()[0]
     return send_file(datadir + album_relative_path + "/" + image_name)
+
+
+@app.route('/thumbs/<image_id>')
+def thumb(image_id):
+    image_name, album_id = db.session.query(Images.name, Images.album).filter_by(id=image_id).filter(
+        Images.id == ImageInformation.imageid).filter(
+        ImageInformation.rating == 5).one()
+    album_relative_path = db.session.query(Albums.relativePath).filter_by(id=album_id).one()[0]
+    im = Image.open(datadir + album_relative_path + "/" + image_name)
+    im.thumbnail([400, 300])
+    iof = BytesIO()
+    im.save(iof, format='JPEG')
+    iof.seek(0)
+    return send_file(iof, mimetype='image/jpeg')
 
 
 @app.route('/favicon.ico')
@@ -156,7 +156,7 @@ def favicon():
 
 
 @app.errorhandler(NoResultFound)
-def handle_bad_request(e):
+def handle_bad_request(_):
     return 'not found!', 404
 
 

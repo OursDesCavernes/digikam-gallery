@@ -3,3 +3,5 @@ flask
 sqlalchemy
 Flask-SQLAlchemy
 sigal
+pillow
+configobj
